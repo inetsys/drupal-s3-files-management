@@ -1,0 +1,75 @@
+<?php
+
+/** Implementation of hook_permission */
+function s3_files_management_permission(){
+	return array(
+		'download s3 private files' => array(
+			'title' => t('Download s3 private files')
+		)
+	);
+}
+
+/** Implementation of hook_menu */
+function s3_files_management_menu(){
+	$items = array();
+
+	$items['admin/config/media/s3fs/private-files'] = array(
+		'title' => 'Private files',
+		'access arguments' => array('administer s3fs'),
+		'page callback' => 'drupal_get_form',
+		'page arguments' => array('_s3_files_management_private_files_form'),
+		'file' => 's3_files_management.admin.inc',
+		'type' => MENU_LOCAL_TASK
+	);
+	$items['files'] = array(
+		'title' => 'Files',
+		'access callback' => '_s3_files_management_user_access',
+		'access arguments' => array('access content', 'download s3 private files'),
+		'page callback' => '_s3_files_management_download_file',
+		'type' => MENU_CALLBACK
+	);
+
+	return $items;
+}
+
+/** Access callback for /files */
+function _s3_files_management_user_access($public_perm, $private_perm){
+	module_load_include('inc', 's3_files_management');
+	$path = substr(current_path(), 6);
+
+	return s3_files_management_is_private($path) ? user_access($private_perm) : user_access($public_perm);
+}
+
+/** Menu callback for files/* */
+function _s3_files_management_download_file(){
+	$args = func_get_args();
+	$path = implode('/', $args);
+	$url = file_create_url('s3://'.$path);
+
+	$code = s3_files_management_is_private($path) ? 302 : 301;
+
+	header('location:'.$url, true, $code);
+	exit;
+}
+
+/** Implementation of hook_s3fs_url_settings_alter */
+function s3_files_management_s3fs_url_settings_alter(&$url_settings, $local_path){
+	module_load_include('inc', 's3_files_management');
+	if(s3_files_management_is_private($local_path)){
+		$url_settings['presigned_url'] = true;
+		$url_settings['timeout'] = 60;
+	}
+}
+
+/** Implementation of hook_s3fs_upload_params_alter */
+function s3_files_management_s3fs_upload_params_alter(&$upload_params){
+	module_load_include('inc', 's3_files_management');
+	if(s3_files_management_is_private($upload_params['Key'])){
+		$upload_params['ACL'] = 'private';
+	}
+}
+
+/** Process IMCE profile callback */
+function _s3_files_management_process_imce(&$imce){
+	$imce['furl'] = '/files/';
+}

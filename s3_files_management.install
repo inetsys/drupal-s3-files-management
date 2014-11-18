@@ -1,0 +1,21 @@
+<?php
+
+function s3_files_management_enable(){
+	$function = '_s3_files_management_process_imce';
+	$imce_custom_process = variable_get('imce_custom_process', array());
+	if(!isset($imce_custom_process[$function])){
+		$imce_custom_process[$function] = $function;
+	}
+
+	variable_set('imce_custom_process', $imce_custom_process);
+}
+
+function s3_files_management_disable(){
+	$function = '_s3_files_management_process_imce';
+	$imce_custom_process = variable_get('imce_custom_process', array());
+	if(isset($imce_custom_process[$function])){
+		unset($imce_custom_process[$function]);
+	}
+
+	variable_set('imce_custom_process', $imce_custom_process);
+}

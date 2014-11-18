@@ -1,0 +1,7 @@
+name = S3 files management
+description = Configuration to manage private files stored in S3
+version = 7.x-1.0
+core = 7.x
+package = Media
+dependencies[] = s3fs
+configure = admin/config/media/s3fs/private-files
