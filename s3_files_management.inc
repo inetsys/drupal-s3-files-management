@@ -1,5 +1,8 @@
 <?php
 
+/**
+ * @return array of string
+ */
 function _s3_files_management_get_private_path(){
 	$path = array();
 	$s3_private_files_path = explode("\n", variable_get('s3_private_files_path', ''));
@@ -13,6 +16,10 @@ function _s3_files_management_get_private_path(){
 	return $path;
 }
 
+/**
+ * @param string $path
+ * @return boolean
+ */
 function s3_files_management_is_private($path){
 	$is_private = false;
 

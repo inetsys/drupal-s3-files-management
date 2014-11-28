@@ -28,19 +28,30 @@ function s3_files_management_menu(){
 		'page callback' => '_s3_files_management_download_file',
 		'type' => MENU_CALLBACK
 	);
-
+	$items['thumbnails/%image_style'] = array(
+		'title' => 'Generate image style in S3',
+		'access callback' => '_s3_files_management_user_access',
+		'access arguments' => array('access content', 'download s3 private files'),
+		'page callback' => '_s3_files_management_download_thumbnail',
+		'page arguments' => array(1),
+		'type' => MENU_CALLBACK,
+	);
 	return $items;
 }
 
 /** Access callback for /files */
 function _s3_files_management_user_access($public_perm, $private_perm){
 	module_load_include('inc', 's3_files_management');
-	$path = substr(current_path(), 6);
+	$parts = explode('/', current_path());
+	if($parts[0] == 'files'){
+		array_shift($parts);
+	}
+	$path = implode('/', $parts);
 
 	return s3_files_management_is_private($path) ? user_access($private_perm) : user_access($public_perm);
 }
 
-/** Menu callback for files/* */
+/** Menu callback for files/ */
 function _s3_files_management_download_file(){
 	$args = func_get_args();
 	$path = implode('/', $args);
@@ -50,6 +61,89 @@ function _s3_files_management_download_file(){
 
 	header('location:'.$url, true, $code);
 	exit;
+}
+
+/** Menu callback for thumbnails/%image_style/ */
+function _s3_files_management_download_thumbnail(){
+	$args = func_get_args();
+
+	$style = array_shift($args);
+	$path = implode('/', $args);
+	$uri = 's3://'.$path;
+
+	$valid = !empty($style);
+	if(!variable_get('image_allow_insecure_derivatives', FALSE) || strpos(ltrim($path, '\/'), 'styles/') === 0){
+		$valid = $valid && isset($_GET[IMAGE_DERIVATIVE_TOKEN]) && $_GET[IMAGE_DERIVATIVE_TOKEN] === image_style_path_token($style['name'], $uri);
+	}
+	if(!$valid){
+		return MENU_ACCESS_DENIED;
+	}
+
+	// $thumbnail_uri = image_style_path($style['name'], $uri);
+	$thumbnail_uri = 's3://thumbnails/'.$style['name'].'/'.$path;
+	$thumbnail_url = file_create_url($thumbnail_uri);
+
+	// Don't start generating the image if the derivative already exists or if
+	// generation is in progress in another thread.
+	$lock_name = '_s3_files_management_download_thumbnail:' . $style['name'] . ':' . drupal_hash_base64($uri);
+	if(!file_exists($thumbnail_uri)){
+		$lock_acquired = lock_acquire($lock_name);
+		if(!$lock_acquired){
+			// Tell client to retry again in 3 seconds. Currently no browsers are known
+			// to support Retry-After.
+			drupal_add_http_header('Status', '503 Service Unavailable');
+			drupal_add_http_header('Retry-After', 3);
+			print t('Image generation in progress. Try again shortly.');
+			drupal_exit();
+		}
+	}
+
+	// Try to generate the image, unless another thread just did it while we were
+	// acquiring the lock.
+	$success = file_exists($thumbnail_uri);
+	if(!$success){
+		// If we successfully generate the derivative, wait until S3 acknolowedges
+		// its existence. Otherwise, redirecting to it may cause a 403 error.
+		$success = image_style_create_derivative($style, $uri, $thumbnail_uri) && file_stream_wrapper_get_instance_by_scheme('s3')->waitUntilFileExists($thumbnail_uri);
+	}
+
+	if(!empty($lock_acquired)){
+		lock_release($lock_name);
+	}
+
+	if($success){
+		$url = $thumbnail_url;
+		$code = s3_files_management_is_private($path) ? 302 : 301;
+
+		header('location:'.$url, true, $code);
+		exit;
+	}else{
+		watchdog('S3 Files Management', 'Unable to generate an image derivative at %path.', array('%path' => $thumbnail_uri));
+		drupal_add_http_header('Status', '500 Internal Server Error');
+		print t('Error generating image.');
+		drupal_exit();
+	}
+}
+
+/** Implementation of hook_file_download */
+function s3_files_management_file_download($uri){
+	if(file_uri_scheme($uri) != 's3'){
+		// It is not my problem
+		return null;
+	}
+
+	$path = file_uri_target($uri);
+
+	$access = s3_files_management_is_private($path) ? user_access('download s3 private files') : user_access('access content');
+	if($access){
+		$info = image_get_info($uri);
+
+		// Access granted
+		return array('Content-Type' => $info['mime_type']);
+	}else{
+		// Access denied
+		return -1;
+	}
 }
 
 /** Implementation of hook_s3fs_url_settings_alter */
@@ -72,4 +166,49 @@ function s3_files_management_s3fs_upload_params_alter(&$upload_params){
 /** Process IMCE profile callback */
 function _s3_files_management_process_imce(&$imce){
 	$imce['furl'] = '/files/';
+}
+
+/** Implementation of hook_preprocess_image */
+function s3_files_management_preprocess_image(&$variables){
+	$uri = $variables['path'];
+	if(file_uri_scheme($uri) == 's3'){
+		$path = file_uri_target($uri);
+		$src = '/files/'.$path;
+
+		$variables['path'] = $src;
+	}
+}
+
+/** Implementation of hook_theme_registry_alter */
+function s3_files_management_theme_registry_alter(&$theme_registry){
+	$theme_registry['image_style']['function'] = '_s3_files_management_theme_image_style';
+}
+/** Override theme_image_style */
+function _s3_files_management_theme_image_style($variables){
+	$uri = $variables['path'];
+
+	if(file_uri_scheme($uri) == 's3'){
+		// Determine the dimensions of the styled image.
+		$dimensions = array(
+			'width' => $variables['width'],
+			'height' => $variables['height'],
+		);
+		image_style_transform_dimensions($variables['style_name'], $dimensions);
+		$variables['width'] = $dimensions['width'];
+		$variables['height'] = $dimensions['height'];
+
+		// Style
+		$style_name = $variables['style_name'];
+
+		// Path
+		$path = file_uri_target($uri);
+		$token_query = array(IMAGE_DERIVATIVE_TOKEN => image_style_path_token($style_name, $uri));
+
+		$variables['path'] = '/thumbnails/'.$style_name.'/'.$path.'?'.drupal_http_build_query($token_query);
+
+		return theme('image', $variables);
+	}else{
+		// Default theme function
+		return theme_image_style($variables);
+	}
 }
